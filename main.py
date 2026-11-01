@@ -17,7 +17,7 @@ if api_key:
     genai.configure(api_key=api_key)
 
 EMBED_MODEL = "models/gemini-embedding-001"
-CHAT_MODEL = os.getenv("GEMINI_CHAT_MODEL", "gemini-2.5-flash")
+CHAT_MODEL = os.getenv("GEMINI_CHAT_MODEL", "gemini-3.8-flash")
 
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 150
