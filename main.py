@@ -1,5 +1,7 @@
 import os
+import re
 import glob
+import time
 import shutil
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import HTMLResponse
@@ -17,50 +19,72 @@ if api_key:
 EMBED_MODEL = "models/gemini-embedding-001"
 CHAT_MODEL = os.getenv("GEMINI_CHAT_MODEL", "gemini-2.5-flash")
 
+CHUNK_SIZE = 1000
+CHUNK_OVERLAP = 150
+BATCH_SIZE = 50
+MAX_REINTENTOS = 5
+
+
+def _embed_con_reintentos(content, task_type: str):
+    """Llama a embed_content y reintenta si Google responde 429 (límite de cuota)."""
+    for intento in range(MAX_REINTENTOS):
+        try:
+            return genai.embed_content(
+                model=EMBED_MODEL,
+                content=content,
+                task_type=task_type,
+            )
+        except Exception as e:
+            if "429" in str(e) and intento < MAX_REINTENTOS - 1:
+                m = re.search(r"retry in ([\d.]+)s", str(e))
+                espera = float(m.group(1)) + 1 if m else 30
+                print(f"Límite de cuota alcanzado, esperando {espera:.0f}s...")
+                time.sleep(espera)
+            else:
+                raise
+
 
 def embed_documents(textos: list[str]) -> list[list[float]]:
-    """Embeddings para indexar documentos (en lotes de 100)."""
+    """Embeddings para indexar documentos, en lotes pequeños."""
     vectores = []
-    for i in range(0, len(textos), 100):
-        lote = textos[i:i + 100]
-        res = genai.embed_content(
-            model=EMBED_MODEL,
-            content=lote,
-            task_type="retrieval_document",
-        )
+    for i in range(0, len(textos), BATCH_SIZE):
+        lote = textos[i:i + BATCH_SIZE]
+        res = _embed_con_reintentos(lote, "retrieval_document")
         vectores.extend(res["embedding"])
     return vectores
 
 
 def embed_query(texto: str) -> list[float]:
     """Embedding para la pregunta del usuario."""
-    res = genai.embed_content(
-        model=EMBED_MODEL,
-        content=texto,
-        task_type="retrieval_query",
-    )
+    res = _embed_con_reintentos(texto, "retrieval_query")
     return res["embedding"]
+
+
+def dividir_en_chunks(texto: str) -> list[str]:
+    """Divide el texto en fragmentos con solapamiento."""
+    chunks = []
+    paso = CHUNK_SIZE - CHUNK_OVERLAP
+    for i in range(0, len(texto), paso):
+        fragmento = texto[i:i + CHUNK_SIZE]
+        if fragmento.strip():
+            chunks.append(fragmento)
+    return chunks
 
 
 chroma_client = chromadb.PersistentClient(path="./chromadb_data")
 
-# Nombre nuevo para no chocar con la colección antigua (otra dimensión)
+# Colección nueva: los embeddings anteriores tenían otra dimensión
 collection = chroma_client.get_or_create_collection(
-    name="nocedal_info_v2",
+    name="nocedal_info_v3",
     metadata={"hnsw:space": "cosine"},
 )
 
 
 def ingestar_pdf(pdf_path: str):
-    """Extrae texto de un PDF e ingesta sus vectores en ChromaDB"""
+    """Extrae texto de un PDF e ingesta sus vectores en ChromaDB."""
     reader = PdfReader(pdf_path)
     text = "".join([page.extract_text() or "" for page in reader.pages])
-    chunk_size = 500
-    chunks = [
-        text[i:i + chunk_size]
-        for i in range(0, len(text), chunk_size)
-        if text[i:i + chunk_size].strip()
-    ]
+    chunks = dividir_en_chunks(text)
 
     if chunks:
         filename = os.path.basename(pdf_path)
@@ -74,7 +98,7 @@ def ingestar_pdf(pdf_path: str):
 
 
 def cargar_todos_los_pdfs():
-    """Ingesta todos los archivos .pdf que existan en la carpeta data/"""
+    """Ingesta todos los archivos .pdf que existan en la carpeta data/."""
     os.makedirs("data", exist_ok=True)
     pdf_files = glob.glob("data/*.pdf")
     total_chunks = 0
@@ -87,7 +111,8 @@ def cargar_todos_los_pdfs():
 def cargar_documentos_al_iniciar():
     try:
         if collection.count() == 0:
-            cargar_todos_los_pdfs()
+            total = cargar_todos_los_pdfs()
+            print(f"Ingesta inicial: {total} fragmentos.")
     except Exception as e:
         print(f"Error en startup: {e}")
 
@@ -109,6 +134,16 @@ def db_info():
         "documentos_en_db": collection.count(),
         "archivos_en_data": archivos,
     }
+
+
+@app.post("/reindexar")
+def reindexar():
+    """Reingesta manual de los PDFs de data/ (útil si el startup falló a medias)."""
+    try:
+        total = cargar_todos_los_pdfs()
+        return {"fragmentos_procesados": total, "total_documentos": collection.count()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al reindexar: {str(e)}")
 
 
 @app.post("/upload")
@@ -252,9 +287,6 @@ def chat(request: QueryRequest):
         raise HTTPException(status_code=400, detail="La pregunta no puede estar vacía")
 
     try:
-        if collection.count() == 0:
-            cargar_todos_los_pdfs()
-
         count = collection.count()
         if count == 0:
             contexto = "No hay información disponible en la base de conocimientos."
@@ -279,4 +311,9 @@ PREGUNTA DEL USUARIO:
         response = model.generate_content(prompt)
         return {"respuesta": response.text}
     except Exception as e:
+        if "429" in str(e):
+            raise HTTPException(
+                status_code=429,
+                detail="El servicio está recibiendo muchas consultas. Intenta de nuevo en un minuto.",
+            )
         raise HTTPException(status_code=500, detail=f"Error al procesar consulta: {str(e)}")
