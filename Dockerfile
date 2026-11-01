@@ -1,8 +1,10 @@
 FROM python:3.11-slim
 
+# Definir directorio temporal con permisos de escritura
+ENV TMPDIR=/tmp
+
 WORKDIR /app
 
-# Crear usuario no-root compatible con OpenShift
 RUN useradd -m -u 1001 appuser
 
 COPY requirements.txt .
@@ -10,7 +12,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Ejecutar ingesta durante el build o asegurar permisos en la carpeta de datos
 RUN python ingest.py || true
 RUN chown -R 1001:0 /app && chmod -R g+rwX /app
 

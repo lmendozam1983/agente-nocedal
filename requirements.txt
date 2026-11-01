@@ -1,6 +1,7 @@
 fastapi
 uvicorn
 google-genai
+google-generativeai
 chromadb
 pypdf
 python-dotenv
