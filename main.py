@@ -5,7 +5,6 @@ from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import chromadb
-from chromadb.api.types import EmbeddingFunction, Documents, Embeddings
 import google.generativeai as genai
 from pypdf import PdfReader
 
@@ -15,44 +14,64 @@ api_key = os.getenv("GEMINI_API_KEY")
 if api_key:
     genai.configure(api_key=api_key)
 
-class GeminiEmbeddingFunction(EmbeddingFunction):
-    def __init__(self, api_key: str = None, model_name: str = "text-embedding-004"):
-        self.api_key = api_key or os.getenv("GEMINI_API_KEY")
-        if self.api_key:
-            genai.configure(api_key=self.api_key)
-        self.model_name = model_name
+EMBED_MODEL = "models/gemini-embedding-001"
+CHAT_MODEL = os.getenv("GEMINI_CHAT_MODEL", "gemini-2.5-flash")
 
-    def __call__(self, input: Documents) -> Embeddings:
-        embeddings = []
-        for text in input:
-            res = genai.embed_content(
-                model="text-embedding-004",  # Sin el prefijo "models/"
-                content=text,
-                task_type="retrieval_query"
-            )
-            embeddings.append(res['embedding'])
-        return embeddings
+
+def embed_documents(textos: list[str]) -> list[list[float]]:
+    """Embeddings para indexar documentos (en lotes de 100)."""
+    vectores = []
+    for i in range(0, len(textos), 100):
+        lote = textos[i:i + 100]
+        res = genai.embed_content(
+            model=EMBED_MODEL,
+            content=lote,
+            task_type="retrieval_document",
+        )
+        vectores.extend(res["embedding"])
+    return vectores
+
+
+def embed_query(texto: str) -> list[float]:
+    """Embedding para la pregunta del usuario."""
+    res = genai.embed_content(
+        model=EMBED_MODEL,
+        content=texto,
+        task_type="retrieval_query",
+    )
+    return res["embedding"]
+
 
 chroma_client = chromadb.PersistentClient(path="./chromadb_data")
-embedding_fn = GeminiEmbeddingFunction(api_key=api_key)
 
+# Nombre nuevo para no chocar con la colección antigua (otra dimensión)
 collection = chroma_client.get_or_create_collection(
-    name="nocedal_info",
-    embedding_function=embedding_fn
+    name="nocedal_info_v2",
+    metadata={"hnsw:space": "cosine"},
 )
+
 
 def ingestar_pdf(pdf_path: str):
     """Extrae texto de un PDF e ingesta sus vectores en ChromaDB"""
     reader = PdfReader(pdf_path)
     text = "".join([page.extract_text() or "" for page in reader.pages])
     chunk_size = 500
-    chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size) if text[i:i+chunk_size].strip()]
+    chunks = [
+        text[i:i + chunk_size]
+        for i in range(0, len(text), chunk_size)
+        if text[i:i + chunk_size].strip()
+    ]
 
     if chunks:
         filename = os.path.basename(pdf_path)
         ids = [f"doc_{filename}_{i}" for i in range(len(chunks))]
-        collection.add(documents=chunks, ids=ids)
+        collection.upsert(
+            documents=chunks,
+            embeddings=embed_documents(chunks),
+            ids=ids,
+        )
     return len(chunks)
+
 
 def cargar_todos_los_pdfs():
     """Ingesta todos los archivos .pdf que existan en la carpeta data/"""
@@ -63,6 +82,7 @@ def cargar_todos_los_pdfs():
         total_chunks += ingestar_pdf(pdf)
     return total_chunks
 
+
 @app.on_event("startup")
 def cargar_documentos_al_iniciar():
     try:
@@ -71,12 +91,15 @@ def cargar_documentos_al_iniciar():
     except Exception as e:
         print(f"Error en startup: {e}")
 
+
 class QueryRequest(BaseModel):
     pregunta: str
+
 
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
 
 @app.get("/info")
 def db_info():
@@ -84,29 +107,32 @@ def db_info():
     archivos = os.listdir("data")
     return {
         "documentos_en_db": collection.count(),
-        "archivos_en_data": archivos
+        "archivos_en_data": archivos,
     }
+
 
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
-    if not file.filename.endswith(".pdf"):
+    if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Solo se permiten archivos en formato .pdf")
-    
+
     os.makedirs("data", exist_ok=True)
-    file_path = os.path.join("data", file.filename)
-    
+    # basename evita rutas maliciosas tipo ../../archivo.pdf
+    file_path = os.path.join("data", os.path.basename(file.filename))
+
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
-    
+
     try:
         chunks_cargados = ingestar_pdf(file_path)
         return {
             "mensaje": f"Archivo '{file.filename}' subido e ingestado con éxito.",
             "fragmentos": chunks_cargados,
-            "total_documentos": collection.count()
+            "total_documentos": collection.count(),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al procesar el archivo: {str(e)}")
+
 
 @app.get("/", response_class=HTMLResponse)
 def home():
@@ -151,6 +177,16 @@ def home():
         </div>
 
         <script>
+            function addMessage(text, classes) {
+                const chatBox = document.getElementById('chat-box');
+                const div = document.createElement('div');
+                div.className = classes + ' whitespace-pre-wrap';
+                div.textContent = text;  // textContent evita inyección de HTML
+                chatBox.appendChild(div);
+                chatBox.scrollTop = chatBox.scrollHeight;
+                return div;
+            }
+
             async function uploadPDF() {
                 const fileInput = document.getElementById('pdf-file');
                 const statusDiv = document.getElementById('upload-status');
@@ -159,7 +195,7 @@ def home():
                 const formData = new FormData();
                 formData.append('file', fileInput.files[0]);
 
-                statusDiv.classList.remove('hidden');
+                statusDiv.className = "bg-yellow-100 text-yellow-800 text-xs px-4 py-2 border-b";
                 statusDiv.innerText = `Subiendo e ingestando '${fileInput.files[0].name}'... Espere un momento.`;
 
                 try {
@@ -176,21 +212,18 @@ def home():
                     statusDiv.className = "bg-red-100 text-red-800 text-xs px-4 py-2 border-b";
                     statusDiv.innerText = "Error de conexión al subir archivo.";
                 }
+                fileInput.value = '';
             }
 
             async function sendMessage() {
                 const input = document.getElementById('user-input');
-                const chatBox = document.getElementById('chat-box');
                 const text = input.value.trim();
                 if (!text) return;
 
-                chatBox.innerHTML += `<div class="bg-blue-900 text-white p-3 rounded-lg max-w-[80%] self-end ml-auto shadow-sm">${text}</div>`;
+                addMessage(text, "bg-blue-900 text-white p-3 rounded-lg max-w-[80%] self-end ml-auto shadow-sm");
                 input.value = '';
-                chatBox.scrollTop = chatBox.scrollHeight;
 
-                const loadingId = 'loading-' + Date.now();
-                chatBox.innerHTML += `<div id="${loadingId}" class="bg-gray-200 text-gray-600 p-3 rounded-lg max-w-[80%] self-start italic">Consultando información...</div>`;
-                chatBox.scrollTop = chatBox.scrollHeight;
+                const loadingElem = addMessage("Consultando información...", "bg-gray-200 text-gray-600 p-3 rounded-lg max-w-[80%] self-start italic");
 
                 try {
                     const response = await fetch('/chat', {
@@ -198,30 +231,26 @@ def home():
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ pregunta: text })
                     });
-                    
-                    const loadingElem = document.getElementById(loadingId);
-                    if (loadingElem) loadingElem.remove();
 
                     const data = await response.json();
-                    const formattedText = (data.respuesta || data.detail || '').replace(/\\n/g, '<br>');
-                    chatBox.innerHTML += `<div class="bg-blue-100 text-blue-900 p-3 rounded-lg max-w-[80%] self-start shadow-sm">${formattedText}</div>`;
+                    loadingElem.remove();
+                    addMessage(data.respuesta || data.detail || 'Sin respuesta.', "bg-blue-100 text-blue-900 p-3 rounded-lg max-w-[80%] self-start shadow-sm");
                 } catch (e) {
-                    const loadingElem = document.getElementById(loadingId);
-                    if (loadingElem) loadingElem.remove();
-                    chatBox.innerHTML += `<div class="bg-red-100 text-red-800 p-3 rounded-lg max-w-[80%] self-start shadow-sm">Error de conexión.</div>`;
+                    loadingElem.remove();
+                    addMessage("Error de conexión.", "bg-red-100 text-red-800 p-3 rounded-lg max-w-[80%] self-start shadow-sm");
                 }
-                chatBox.scrollTop = chatBox.scrollHeight;
             }
         </script>
     </body>
     </html>
     """
 
+
 @app.post("/chat")
 def chat(request: QueryRequest):
-    if not request.pregunta:
+    if not request.pregunta.strip():
         raise HTTPException(status_code=400, detail="La pregunta no puede estar vacía")
-    
+
     try:
         if collection.count() == 0:
             cargar_todos_los_pdfs()
@@ -231,12 +260,12 @@ def chat(request: QueryRequest):
             contexto = "No hay información disponible en la base de conocimientos."
         else:
             results = collection.query(
-                query_texts=[request.pregunta],
-                n_results=min(3, count)
+                query_embeddings=[embed_query(request.pregunta)],
+                n_results=min(3, count),
             )
             context_docs = results.get("documents", [[]])[0]
             contexto = "\n---\n".join(context_docs) if context_docs else "Sin contexto relevante."
-        
+
         prompt = f"""Eres un asistente amigable de admisión del Colegio Nocedal (La Pintana, Santiago).
 Responde la pregunta del usuario utilizando la siguiente información institucional:
 
@@ -246,7 +275,7 @@ CONTEXTO INSTITUCIONAL:
 PREGUNTA DEL USUARIO:
 {request.pregunta}
 """
-        model = genai.GenerativeModel("gemini-3.8-flash")
+        model = genai.GenerativeModel(CHAT_MODEL)
         response = model.generate_content(prompt)
         return {"respuesta": response.text}
     except Exception as e:
