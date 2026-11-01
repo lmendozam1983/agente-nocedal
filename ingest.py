@@ -1,47 +1,60 @@
 import os
-from pypdf import PdfReader
 import chromadb
-from chromadb.utils.embedding_functions import GoogleGenerativeAiEmbeddingFunction
+from chromadb.api.types import EmbeddingFunction, Documents, Embeddings
+import google.generativeai as genai
+from pypdf import PdfReader
 
-def cargar_y_procesar_pdfs():
-    # 1. Inicializar cliente de embeddings con Gemini
+class GeminiEmbeddingFunction(EmbeddingFunction):
+    def __init__(self, api_key: str = None, model_name: str = "models/text-embedding-004"):
+        self.api_key = api_key or os.getenv("GEMINI_API_KEY")
+        if self.api_key:
+            genai.configure(api_key=self.api_key)
+        self.model_name = model_name
+
+    def __call__(self, input: Documents) -> Embeddings:
+        embeddings = []
+        for text in input:
+            res = genai.embed_content(
+                model=self.model_name,
+                content=text,
+                task_type="retrieval_document"
+            )
+            embeddings.append(res['embedding'])
+        return embeddings
+
+def main():
     api_key = os.getenv("GEMINI_API_KEY")
-    embedding_fn = GoogleGenerativeAiEmbeddingFunction(
-        api_key=api_key,
-        model_name="models/text-embedding-004"
-    )
+    if not api_key:
+        print("Aviso: GEMINI_API_KEY no configurada. Omitiendo ingesta previa.")
+        return
 
-    # 2. Conectar a ChromaDB persistente
-    client = chromadb.PersistentClient(path="./chromadb_data")
-    collection = client.get_or_create_collection(
-        name="nocedal_knowledge",
-        embedding_function=embedding_fn
-    )
-
-    # 3. Leer PDFs de la carpeta data/
     pdf_path = "data/admision_nocedal.pdf"
     if not os.path.exists(pdf_path):
-        print("Agrega primero tus PDFs en la carpeta data/")
+        print(f"Aviso: {pdf_path} no existe. Omitiendo ingesta.")
         return
 
     reader = PdfReader(pdf_path)
-    textos, ids, metadatos = [], [], []
+    text = ""
+    for page in reader.pages:
+        text += page.extract_text() or ""
 
-    chunk_id = 0
-    for num_pagina, pagina in enumerate(reader.pages):
-        texto_pagina = pagina.extract_text()
-        if texto_pagina.strip():
-            # Fragmentación básica por páginas/párrafos
-            textos.append(texto_pagina)
-            ids.append(f"doc_{chunk_id}")
-            metadatos.append({"pagina": num_pagina + 1, "fuente": "admision_nocedal.pdf"})
-            chunk_id += 1
+    chunk_size = 500
+    chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size) if text[i:i+chunk_size].strip()]
 
-    # 4. Guardar en la base de datos
-    collection.add(documents=textos, ids=ids, metadatas=metadatos)
-    print(f"Ingesta completada. {len(textos)} fragmentos guardados en ChromaDB.")
+    chroma_client = chromadb.PersistentClient(path="./chromadb_data")
+    embedding_fn = GeminiEmbeddingFunction(api_key=api_key)
+    
+    collection = chroma_client.get_or_create_collection(
+        name="nocedal_info",
+        embedding_function=embedding_fn
+    )
+
+    ids = [f"doc_{i}" for i in range(len(chunks))]
+    collection.add(
+        documents=chunks,
+        ids=ids
+    )
+    print(f"Ingesta exitosa: {len(chunks)} fragmentos procesados.")
 
 if __name__ == "__main__":
-    from dotenv import load_dotenv
-    load_dotenv()
-    cargar_y_procesar_pdfs()
+    main()

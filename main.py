@@ -1,60 +1,77 @@
 import os
-import chromadb
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from google import genai
-from chromadb.utils.embedding_functions import GoogleGenerativeAiEmbeddingFunction
+import chromadb
+from chromadb.api.types import EmbeddingFunction, Documents, Embeddings
+import google.generativeai as genai
 
-app = FastAPI(title="Agente IA - Colegio Nocedal")
+app = FastAPI(title="Agente Colegio Nocedal")
 
-# Inicialización de Gemini y ChromaDB
-API_KEY = os.getenv("GEMINI_API_KEY")
-client_gemini = genai.Client(api_key=API_KEY)
+api_key = os.getenv("GEMINI_API_KEY")
+if api_key:
+    genai.configure(api_key=api_key)
 
-embedding_fn = GoogleGenerativeAiEmbeddingFunction(
-    api_key=API_KEY,
-    model_name="models/text-embedding-004"
-)
+# Clase de embeddings personalizada para evitar fallos con ChromaDB
+class GeminiEmbeddingFunction(EmbeddingFunction):
+    def __init__(self, api_key: str = None, model_name: str = "models/text-embedding-004"):
+        self.api_key = api_key or os.getenv("GEMINI_API_KEY")
+        if self.api_key:
+            genai.configure(api_key=self.api_key)
+        self.model_name = model_name
+
+    def __call__(self, input: Documents) -> Embeddings:
+        embeddings = []
+        for text in input:
+            res = genai.embed_content(
+                model=self.model_name,
+                content=text,
+                task_type="retrieval_query"
+            )
+            embeddings.append(res['embedding'])
+        return embeddings
 
 chroma_client = chromadb.PersistentClient(path="./chromadb_data")
+embedding_fn = GeminiEmbeddingFunction(api_key=api_key)
+
 collection = chroma_client.get_or_create_collection(
-    name="nocedal_knowledge",
+    name="nocedal_info",
     embedding_function=embedding_fn
 )
 
-class ConsultaRequest(BaseModel):
+class QueryRequest(BaseModel):
     pregunta: str
-
-@app.post("/chat")
-def responder_consulta(req: ConsultaRequest):
-    try:
-        # 1. Recuperar contexto relevante de ChromaDB
-        results = collection.query(query_texts=[req.pregunta], n_results=3)
-        contexto = "\n\n".join(results['documents'][0]) if results['documents'] else "Sin información adicional."
-
-        # 2. Construir el Prompt con restricción de contexto
-        system_instruction = (
-            "Eres el asistente virtual oficial de admisión del Colegio Nocedal de La Pintana. "
-            "Responde a los apoderados con un tono amable, claro y empático. "
-            "Usa EXCLUSIVAMENTE la información provista en el contexto. Si no está en el contexto, "
-            "indica amablemente que pueden contactar al colegio a admision@colegionocedal.cl. "
-            "Recuerda siempre mencionar que el colegio es 100% gratuito y que la postulación es vía SAE."
-        )
-
-        prompt = f"Contexto Oficial del Colegio:\n{contexto}\n\nPregunta del Apoderado: {req.pregunta}"
-
-        # 3. Consultar a Gemini
-        response = client_gemini.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=prompt,
-            config={"system_instruction": system_instruction}
-        )
-
-        return {"respuesta": response.text}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+@app.post("/chat")
+def chat(request: QueryRequest):
+    if not request.pregunta:
+        raise HTTPException(status_code=400, detail="La pregunta no puede estar vacía")
+    
+    # Búsqueda en la base de datos vectorial
+    results = collection.query(
+        query_texts=[request.pregunta],
+        n_results=3
+    )
+    
+    context_docs = results.get("documents", [[]])[0]
+    contexto = "\n---\n".join(context_docs) if context_docs else "No se encontró información adicional."
+    
+    prompt = f"""Eres un asistente amigable de admisión del Colegio Nocedal (La Pintana, Santiago).
+Responde la pregunta del usuario utilizando la siguiente información del colegio:
+
+CONTEXTO:
+{contexto}
+
+PREGUNTA:
+{request.pregunta}
+"""
+    
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = model.generate_content(prompt)
+        return {"respuesta": response.text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al generar respuesta: {str(e)}")
