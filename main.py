@@ -141,17 +141,18 @@ def chat(request: QueryRequest):
     if not request.pregunta:
         raise HTTPException(status_code=400, detail="La pregunta no puede estar vacía")
     
-    if collection.count() == 0:
-        contexto = "No hay documentos adicionales disponibles en la base de conocimientos."
-    else:
-        results = collection.query(
-            query_texts=[request.pregunta],
-            n_results=min(3, collection.count())
-        )
-        context_docs = results.get("documents", [[]])[0]
-        contexto = "\n---\n".join(context_docs) if context_docs else "Sin contexto relevante."
-    
-    prompt = f"""Eres un asistente amigable de admisión del Colegio Nocedal (La Pintana, Santiago).
+    try:
+        if collection.count() == 0:
+            contexto = "No hay documentos adicionales disponibles en la base de conocimientos."
+        else:
+            results = collection.query(
+                query_texts=[request.pregunta],
+                n_results=min(2, collection.count())
+            )
+            context_docs = results.get("documents", [[]])[0]
+            contexto = "\n---\n".join(context_docs) if context_docs else "Sin contexto relevante."
+        
+        prompt = f"""Eres un asistente amigable de admisión del Colegio Nocedal (La Pintana, Santiago).
 Responde la pregunta del usuario utilizando la siguiente información institucional:
 
 CONTEXTO:
@@ -160,10 +161,8 @@ CONTEXTO:
 PREGUNTA:
 {request.pregunta}
 """
-    
-    try:
         model = genai.GenerativeModel("gemini-3.8-flash")
         response = model.generate_content(prompt)
         return {"respuesta": response.text}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al generar respuesta: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al procesar consulta: {str(e)}")
