@@ -4,6 +4,7 @@ from pydantic import BaseModel
 import chromadb
 from chromadb.api.types import EmbeddingFunction, Documents, Embeddings
 import google.generativeai as genai
+from pypdf import PdfReader
 
 app = FastAPI(title="Agente Colegio Nocedal")
 
@@ -37,6 +38,28 @@ collection = chroma_client.get_or_create_collection(
     embedding_function=embedding_fn
 )
 
+# Auto-ingesta si la base de datos está vacía al iniciar el Pod
+def cargar_documentos_si_vacio():
+    try:
+        if collection.count() == 0:
+            pdf_path = "data/admision_nocedal.pdf"
+            if os.path.exists(pdf_path):
+                print("Iniciando ingesta de documentos en ChromaDB...")
+                reader = PdfReader(pdf_path)
+                text = "".join([page.extract_text() or "" for page in reader.pages])
+                chunk_size = 500
+                chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size) if text[i:i+chunk_size].strip()]
+                if chunks:
+                    ids = [f"doc_{i}" for i in range(len(chunks))]
+                    collection.add(documents=chunks, ids=ids)
+                    print(f"Ingesta exitosa: {len(chunks)} fragmentos cargados.")
+            else:
+                print(f"Advertencia: No se encontró el archivo {pdf_path}")
+    except Exception as e:
+        print(f"Error durante la auto-ingesta: {e}")
+
+cargar_documentos_si_vacio()
+
 class QueryRequest(BaseModel):
     pregunta: str
 
@@ -49,16 +72,19 @@ def chat(request: QueryRequest):
     if not request.pregunta:
         raise HTTPException(status_code=400, detail="La pregunta no puede estar vacía")
     
-    results = collection.query(
-        query_texts=[request.pregunta],
-        n_results=3
-    )
-    
-    context_docs = results.get("documents", [[]])[0]
-    contexto = "\n---\n".join(context_docs) if context_docs else "No se encontró información adicional."
+    # Si no hay documentos cargados, devolver respuesta directa de la IA
+    if collection.count() == 0:
+        contexto = "No hay documentos adicionales disponibles en la base de conocimientos."
+    else:
+        results = collection.query(
+            query_texts=[request.pregunta],
+            n_results=min(3, collection.count())
+        )
+        context_docs = results.get("documents", [[]])[0]
+        contexto = "\n---\n".join(context_docs) if context_docs else "Sin contexto relexante."
     
     prompt = f"""Eres un asistente amigable de admisión del Colegio Nocedal (La Pintana, Santiago).
-Responde la pregunta del usuario utilizando la siguiente información del colegio:
+Responde la pregunta del usuario utilizando la siguiente información institucional:
 
 CONTEXTO:
 {contexto}
