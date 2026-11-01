@@ -1,5 +1,6 @@
 import os
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import chromadb
 from chromadb.api.types import EmbeddingFunction, Documents, Embeddings
@@ -20,14 +21,12 @@ class GeminiEmbeddingFunction(EmbeddingFunction):
         self.model_name = model_name
 
     def __call__(self, input: Documents) -> Embeddings:
-        # Petición en lote para evitar múltiples llamadas HTTP lentas
         res = genai.embed_content(
             model=self.model_name,
             content=input,
             task_type="retrieval_query"
         )
         embeddings = res['embedding']
-        # Si se envió un solo texto, encapsularlo en lista
         if isinstance(embeddings[0], (float, int)):
             return [embeddings]
         return embeddings
@@ -65,6 +64,77 @@ class QueryRequest(BaseModel):
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+# --- INTERFAZ GRÁFICA EN RUTA RAÍZ ---
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return """
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Asistente Virtual - Colegio Nocedal</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+    </head>
+    <body class="bg-gray-100 h-screen flex flex-col items-center justify-center p-4">
+        <div class="w-full max-w-2xl bg-white rounded-xl shadow-lg flex flex-col h-[600px] overflow-hidden border border-gray-200">
+            <!-- Encabezado -->
+            <div class="bg-blue-900 text-white p-4 font-bold text-lg flex items-center justify-between">
+                <span>🤖 Agente IA - Colegio Nocedal</span>
+                <span class="text-xs bg-blue-700 px-2 py-1 rounded">En línea</span>
+            </div>
+            <!-- Historial de Chat -->
+            <div id="chat-box" class="flex-1 p-4 overflow-y-auto space-y-4 bg-slate-50 flex flex-col">
+                <div class="bg-blue-100 text-blue-900 p-3 rounded-lg max-w-[80%] self-start shadow-sm">
+                    ¡Hola! Soy el asistente institucional del Colegio Nocedal. Puedes preguntarme sobre la admisión, matrícula o especialidades técnico-profesionales.
+                </div>
+            </div>
+            <!-- Entrada de usuario -->
+            <div class="p-4 border-t flex gap-2 bg-white">
+                <input id="user-input" type="text" placeholder="Escribe tu mensaje aquí..." class="flex-1 border rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-600" onkeypress="if(event.key==='Enter') sendMessage()">
+                <button onclick="sendMessage()" class="bg-blue-900 text-white px-5 py-2 rounded-lg hover:bg-blue-800 font-semibold transition-colors">Enviar</button>
+            </div>
+        </div>
+
+        <script>
+            async function sendMessage() {
+                const input = document.getElementById('user-input');
+                const chatBox = document.getElementById('chat-box');
+                const text = input.value.trim();
+                if (!text) return;
+
+                // Agregar mensaje de usuario
+                chatBox.innerHTML += `<div class="bg-blue-900 text-white p-3 rounded-lg max-w-[80%] self-end ml-auto shadow-sm">${text}</div>`;
+                input.value = '';
+                chatBox.scrollTop = chatBox.scrollHeight;
+
+                // Indicador de carga
+                const loadingId = 'loading-' + Date.now();
+                chatBox.innerHTML += `<div id="${loadingId}" class="bg-gray-200 text-gray-600 p-3 rounded-lg max-w-[80%] self-start italic">Consultando información...</div>`;
+                chatBox.scrollTop = chatBox.scrollHeight;
+
+                try {
+                    const response = await fetch('/chat', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ pregunta: text })
+                    });
+                    const data = await response.json();
+                    document.getElementById(loadingId).remove();
+
+                    const respuestaText = data.respuesta || data.detail || 'Ocurrió un error inesperado.';
+                    chatBox.innerHTML += `<div class="bg-blue-100 text-blue-900 p-3 rounded-lg max-w-[80%] self-start shadow-sm">${respuestaText.replace(/\\n/g, '<br>')}</div>`;
+                } catch (e) {
+                    document.getElementById(loadingId).remove();
+                    chatBox.innerHTML += `<div class="bg-red-100 text-red-800 p-3 rounded-lg max-w-[80%] self-start shadow-sm">Error de conexión con la API.</div>`;
+                }
+                chatBox.scrollTop = chatBox.scrollHeight;
+            }
+        </script>
+    </body>
+    </html>
+    """
 
 @app.post("/chat")
 def chat(request: QueryRequest):
