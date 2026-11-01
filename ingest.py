@@ -5,7 +5,7 @@ import google.generativeai as genai
 from pypdf import PdfReader
 
 class GeminiEmbeddingFunction(EmbeddingFunction):
-    def __init__(self, api_key: str = None, model_name: str = "models/text-embedding-004"):
+    def __init__(self, api_key: str = None, model_name: str = "models/embedding-001"):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
         if self.api_key:
             genai.configure(api_key=self.api_key)

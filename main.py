@@ -11,9 +11,8 @@ api_key = os.getenv("GEMINI_API_KEY")
 if api_key:
     genai.configure(api_key=api_key)
 
-# Clase de embeddings personalizada para evitar fallos con ChromaDB
 class GeminiEmbeddingFunction(EmbeddingFunction):
-    def __init__(self, api_key: str = None, model_name: str = "models/text-embedding-004"):
+    def __init__(self, api_key: str = None, model_name: str = "models/embedding-001"):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
         if self.api_key:
             genai.configure(api_key=self.api_key)
@@ -50,7 +49,6 @@ def chat(request: QueryRequest):
     if not request.pregunta:
         raise HTTPException(status_code=400, detail="La pregunta no puede estar vacía")
     
-    # Búsqueda en la base de datos vectorial
     results = collection.query(
         query_texts=[request.pregunta],
         n_results=3
