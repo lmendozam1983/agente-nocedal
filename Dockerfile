@@ -1,22 +1,22 @@
 FROM python:3.11-slim
 
-# Definir directorio temporal con permisos de escritura
+# Redirigir archivos temporales y HOME a /tmp
+ENV HOME=/tmp
 ENV TMPDIR=/tmp
 
 WORKDIR /app
-
-RUN useradd -m -u 1001 appuser
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN python ingest.py || true
-RUN chown -R 1001:0 /app && chmod -R g+rwX /app
+# Crear carpeta para ChromaDB y dar permisos completos a /app y /tmp
+RUN mkdir -p /app/chromadb_data && chmod -R 777 /app /tmp
 
 USER 1001
 
 EXPOSE 8080
 
-CMD ["gunicorn", "-w", "2", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8080", "main:app"]
+# Incluir --worker-tmp-dir /tmp para los procesos de Gunicorn
+CMD ["gunicorn", "-w", "2", "-k", "uvicorn.workers.UvicornWorker", "--worker-tmp-dir", "/tmp", "--bind", "0.0.0.0:8080", "main:app"]
