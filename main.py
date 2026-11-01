@@ -16,7 +16,7 @@ if api_key:
     genai.configure(api_key=api_key)
 
 class GeminiEmbeddingFunction(EmbeddingFunction):
-    def __init__(self, api_key: str = None, model_name: str = "models/text-embedding-004"):
+    def __init__(self, api_key: str = None, model_name: str = "text-embedding-004"):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
         if self.api_key:
             genai.configure(api_key=self.api_key)
@@ -26,7 +26,7 @@ class GeminiEmbeddingFunction(EmbeddingFunction):
         embeddings = []
         for text in input:
             res = genai.embed_content(
-                model=self.model_name,
+                model="text-embedding-004",  # Sin el prefijo "models/"
                 content=text,
                 task_type="retrieval_query"
             )
